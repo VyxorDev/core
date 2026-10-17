@@ -80,6 +80,43 @@ async def test_device_added_without_hub(
     assert await hass.config_entries.async_unload(mock_config_entry.entry_id)
 
 
+async def test_device_discovery_retries_after_info_failure(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_tellduslive: MagicMock,
+) -> None:
+    """Test device discovery is retried when fetching device info fails."""
+    device = mock_tellduslive.device.return_value
+    device.info.side_effect = [
+        None,
+        {
+            "model": "selflearning-switch",
+            "protocol": "arctech",
+            "client": HUB_ID,
+        },
+    ]
+
+    mock_config_entry.add_to_hass(hass)
+
+    assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    await mock_config_entry.runtime_data.setup_task
+    await hass.async_block_till_done()
+    assert mock_config_entry.state is ConfigEntryState.LOADED
+
+    # The first device info request failed, so the device must not be added yet.
+    assert device.info.call_count == 1
+    assert not hass.states.async_all("switch")
+
+    # The next scheduled update should retry discovery.
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(minutes=1))
+    await hass.async_block_till_done()
+
+    assert device.info.call_count == 2
+    assert hass.states.async_all("switch")
+
+    assert await hass.config_entries.async_unload(mock_config_entry.entry_id)
+
+
 async def test_setup_not_authorized(
     hass: HomeAssistant,
     mock_config_entry: MockConfigEntry,

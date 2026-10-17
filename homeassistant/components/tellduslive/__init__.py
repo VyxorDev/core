@@ -147,15 +147,20 @@ class TelldusLiveClient:
         """Discover the component."""
         device = self._client.device(device_id)
         component = self.identify_device(device)
-        self._device_infos.update(
-            {device_id: await self._hass.async_add_executor_job(device.info)}
-        )
+
+        device_info = await self._hass.async_add_executor_job(device.info)
+        if device_info is None:
+            return False
+
+        self._device_infos[device_id] = device_info
+
         async with self._platforms_lock:
             if component not in self.platforms:
                 await self._hass.config_entries.async_forward_entry_setups(
                     self._config_entry, [component]
                 )
                 self.platforms.add(component)
+
         device_ids = []
         if device.is_sensor:
             device_ids.extend(
@@ -163,10 +168,13 @@ class TelldusLiveClient:
             )
         else:
             device_ids.append(device_id)
+
         for _id in device_ids:
             async_dispatcher_send(
                 self._hass, TELLDUS_DISCOVERY_NEW.format(component, DOMAIN), _id
             )
+
+        return True
 
     async def update(self, *args):
         """Periodically poll the servers for current state."""
@@ -174,12 +182,15 @@ class TelldusLiveClient:
             if not await self._hass.async_add_executor_job(self._client.update):
                 _LOGGER.warning("Failed request")
                 return
+
             dev_ids = {dev.device_id for dev in self._client.devices}
             new_devices = dev_ids - self._known_devices
+
             # just await each discover as `gather` use up all HTTPAdapter pools
             for d_id in new_devices:
-                await self._discover(d_id)
-            self._known_devices |= new_devices
+                if await self._discover(d_id):
+                    self._known_devices.add(d_id)
+
             async_dispatcher_send(self._hass, SIGNAL_UPDATE_ENTITY)
         finally:
             # An update still in flight at unload must not schedule another.
